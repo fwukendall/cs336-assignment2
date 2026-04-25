@@ -1,0 +1,487 @@
+smoke:
+  name: "smoke"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 16
+    grad_accum_steps: 4
+    max_steps: 200
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 50
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+
+full_v20260418_w1e3_s1e4_lr001-0001_b64:
+  name: "full_v20260418_w1e3_s1e4_lr001-0001_b64"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 16
+    grad_accum_steps: 4
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+
+full_v20260419_owt_w1e3_s4e4_lr001-0001_b64:
+  name: "full_v20260419_owt_w1e3_s4e4_lr001-0001_b64"
+  model_dimension:
+    vocab_size: 32000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 8
+    grad_accum_steps: 8
+    max_steps: 40000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+
+tiny_lrexp_001_b64:
+  name: "tiny_lrexp_001_b64"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 16
+    grad_accum_steps: 4
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-3
+      a_max: 1.0e-2
+
+
+tiny_lrexp_01_b64:
+  name: "tiny_lrexp_01_b64"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-2
+      a_max: 1.0e-1
+
+
+tiny_lrexp_1_b64:
+  name: "tiny_lrexp_1_b64"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-1
+      a_max: 1.0
+
+
+tiny_lrexp_00001_b64:
+  name: "tiny_lrexp_00001_b64"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-4
+
+tiny_bsexp_1_lrscaletobs:
+  name: "tiny_bsexp_1_lrscaletobs"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 1
+    grad_accum_steps: 1
+    max_steps: 1280000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 32000
+      a_min: 1.25e-5
+      a_max: 1.25e-4
+
+tiny_bsexp_4_lrscaletobs:
+  name: "tiny_bsexp_4_lrscaletobs"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 4
+    grad_accum_steps: 1
+    max_steps: 320000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 8000
+      a_min: 2.5e-5
+      a_max: 2.5e-4
+
+
+tiny_bsexp_64_lrscaletobs:
+  name: "tiny_bsexp_64_lrscaletobs"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+tiny_bsexp_16_lrscaletobs:
+  name: "tiny_bsexp_16_lrscaletobs"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 16
+    grad_accum_steps: 1
+    max_steps: 80000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 2000
+      a_min: 5.0e-5
+      a_max: 5.0e-4
+
+
+tiny_bsexp_128_lrscaletobs:
+  name: "tiny_bsexp_128_lrscaletobs"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 128
+    grad_accum_steps: 1
+    max_steps: 10000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 250
+      a_min: 1.414e-4
+      a_max: 1.414e-3
+
+
+tiny_bsexp_256_lrscaletobs:
+  name: "tiny_bsexp_256_lrscaletobs"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+  train_params:
+    batch_size: 128
+    grad_accum_steps: 2
+    max_steps: 5000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 125
+      a_min: 2.0e-4
+      a_max: 2.0e-3
+
+
+tiny_ablation_silu:
+  name: "tiny_ablation_silu"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 2048
+    theta: 10000
+    use_silu: True
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+
+tiny_ablation_nope:
+  name: "tiny_ablation_nope"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+    use_rope: False
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+
+tiny_ablation_nonorm:
+  name: "tiny_ablation_nonorm"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+    norm_mode: "no"
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
+
+tiny_ablation_nonorm_smalllr:
+  name: "tiny_ablation_nonorm_smalllr"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+    norm_mode: "no"
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-5
+      a_max: 1.0e-4
+
+
+tiny_ablation_postnorm:
+  name: "tiny_ablation_postnorm"
+  model_dimension:
+    vocab_size: 10000
+    context_length: 256
+    num_layers: 4
+    d_model: 512
+    num_heads: 16
+    d_ff: 1344
+    theta: 10000
+    norm_mode: "post"
+  train_params:
+    batch_size: 64
+    grad_accum_steps: 1
+    max_steps: 20000
+    grad_max: 1.0
+    adam_params:
+      weight_decay: 0.01
+      betas:
+        - 0.9
+        - 0.999
+      eps: 1.0e-8
+    lr_schedule:
+      warmup_iters: 500
+      a_min: 1.0e-4
+      a_max: 1.0e-3
+
