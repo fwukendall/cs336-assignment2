@@ -18,7 +18,7 @@ def load_optimizer(
     model: torch.nn.Module,
     device='cuda',
 ) -> torch.optim.Optimizer:
-    opt = cs336_bmine.train_util.AdamW(model.parameters(), **opt_params, device=device)
+    opt = cs336_bmine.train_util.AdamW(model.parameters(), **opt_params)
     return opt
 
 @torch.inference_mode(True)
@@ -152,14 +152,14 @@ def run_preset(
         'medium': (1024, 4096, 24, 16),
         'large': (1280, 5120, 36, 20),
         'xl': (2560, 10240, 32, 32),
-        '10B': (4608, 12288, 50, 36),
+        # '10B': (4608, 12288, 50, 36),
     }
 
     keys = ('d_model', 'd_ff',  'num_layers', 'num_heads')
     model_dims_dict = {}
     for name, mdims in setups.items():
-        if on_laptop and name == '10B':
-            print("Won't be able to run 10B on your measly 3050")
+        if on_laptop and name in ('10B', 'xl', 'large', 'medium'):
+            print(f"Won't be able to run {name} on your measly 3050")
             continue
         model_dims = dict(zip(keys, mdims))
         model_dims['context_length'] = context_length
@@ -172,6 +172,7 @@ def run_preset(
     for mode in ['fw', 'fw-bw', 'fw-bw-opt']:
         stats_all[mode] = {}
         for name, model_dims in model_dims_dict.items():
+            print(f'benchmarking {mode} on {name}')
             times = run_benchmark(
                 warmup=warmup,
                 n_steps=n_steps,
