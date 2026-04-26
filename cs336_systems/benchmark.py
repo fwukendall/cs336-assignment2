@@ -7,6 +7,7 @@ from functools import partial
 import numpy as np
 import pandas as pd
 import fire
+import torch.cuda.nvtx as nvtx
 
 def load_model(model_dims: dict, device='cuda') -> torch.nn.Module:
     model = cs336_bmine.langmodel.TransformerLM(**model_dims, device=device)
@@ -37,11 +38,12 @@ def benchmark_fw(
     times = []
     for _ in range(n_steps):
         x, _ = get_batch()
-        torch.cuda.synchronize(device)
-        start_t = timeit.default_timer()
-        _ = model(x)
-        torch.cuda.synchronize(device)
-        end_t = timeit.default_timer()
+        with nvtx.range('bmmode_fw'):
+            torch.cuda.synchronize(device)
+            start_t = timeit.default_timer()
+            _ = model(x)
+            torch.cuda.synchronize(device)
+            end_t = timeit.default_timer()
         times.append(end_t - start_t)
     return times
 
@@ -70,28 +72,32 @@ def benchmark_full(
         x, y = get_batch()
         if opt is not None:
             opt.zero_grad(set_to_none=True)
-        torch.cuda.synchronize(device)
-        start_t = timeit.default_timer()
-        logits = model(x)
 
-        torch.cuda.synchronize(device)
-        pt = timeit.default_timer()
+        with nvtx.range('bmmode_fw_withgrad'):
+            torch.cuda.synchronize(device)
+            start_t = timeit.default_timer()
+            logits = model(x)
+
+            torch.cuda.synchronize(device)
+            pt = timeit.default_timer()
         curtime += pt - start_t
 
         ce = cs336_bmine.train_util.cross_entropy(logits, y)
-        torch.cuda.synchronize(device)
-        start_t = timeit.default_timer()
-        ce.backward()
-        torch.cuda.synchronize(device)
-        pt = timeit.default_timer()
+        with nvtx.range('bmmode_bw'):
+            torch.cuda.synchronize(device)
+            start_t = timeit.default_timer()
+            ce.backward()
+            torch.cuda.synchronize(device)
+            pt = timeit.default_timer()
         curtime += pt - start_t
 
         if opt is not None:
-            torch.cuda.synchronize(device)
-            start_t = timeit.default_timer()
-            opt.step()
-            torch.cuda.synchronize(device)
-            pt = timeit.default_timer()
+            with nvtx.range('bmmode_opt'):
+                torch.cuda.synchronize(device)
+                start_t = timeit.default_timer()
+                opt.step()
+                torch.cuda.synchronize(device)
+                pt = timeit.default_timer()
             curtime += pt - start_t
         times.append(curtime)
     return times

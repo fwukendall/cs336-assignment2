@@ -2,6 +2,14 @@
 cs336-spring2024-assignment-2-submission.zip
 test_results.xml
 
+*.lock
+*.ipynb
+*.deb
+*.nsys-rep
+
+data
+.vscode
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
