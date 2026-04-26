@@ -151,6 +151,7 @@ def run_preset(
     context_length: int = 512,
     vocab_size: int = 10000,
     batch_size: int = 4,
+    config: str = 'xl',
 ):
     setups = {
         # name: d_model d_ff num_layers num_heads
@@ -158,12 +159,14 @@ def run_preset(
         'medium': (1024, 4096, 24, 16),
         'large': (1280, 5120, 36, 20),
         'xl': (2560, 10240, 32, 32),
-        # '10B': (4608, 12288, 50, 36),
+        '10B': (4608, 12288, 50, 36),
     }
 
     keys = ('d_model', 'd_ff',  'num_layers', 'num_heads')
     model_dims_dict = {}
     for name, mdims in setups.items():
+        if name != config:
+            continue
         if on_laptop and name in ('10B', 'xl', 'large', 'medium'):
             print(f"Won't be able to run {name} on your measly 3050")
             continue
