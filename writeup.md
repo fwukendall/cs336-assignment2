@@ -1,7 +1,8 @@
 ### TODOs 20260501
 - Single GPU A-100:
-    - Run profiling of attention forward-pass comparing matmul and softmax
     - with autocast bf16, run benchmarking script of all model sizes, context-length 512 (small, medium, large, XL)
+    - Run memory profiling for XL-128 and XL-512
+    - Run memory profiling for compiled-checkpointed XL-2048, and compare XL-512
 
 
 ## Problem (benchmarking_script):  Benchmarking Script (4 points)
@@ -263,6 +264,7 @@ Profile your complete training step of forward pass, backward pass, and optimize
 
 Deliverable: Two images of the “Active memory timeline” of an xl model, from the memory_viz tool: one for the forward pass, and one for running a full training step (forward and backward passes, then optimizer step), and a 2-3 sentence response.
 
+TODO
 
 
 **(b) What is the peak memory usage of each context length when doing a forward pass? What about when doing a full training step?**
@@ -273,14 +275,109 @@ Deliverable: A table with two numbers per context length.
 
 Deliverable: A 2-3 sentence response.
 
+TODO
+
 **(d) Consider the xl model. Given our reference hyperparameters, what is the size of a tensor of activations in the Transformer residual stream, in single-precision? Give this size in MiB (i.e., divide the number of bytes by 1024^2).**
 
 Deliverable: A 1-2 sentence response with your derivation.
+
+TODO
 
 **(e) Now look closely at the “Active Memory Timeline” from pytorch.org/memory_viz of a memory snapshot of the xl model doing a forward pass. When you reduce the “Detail” level, the tool hides the smallest allocations to the corresponding level (e.g., putting “Detail” at 10% only shows the 10% largest allocations). What is the size of the largest allocations shown? Looking through the stack trace, can you tell where those allocations come from?**
 
 Deliverable: A 1-2 sentence response.
 
+TODO
+
 **(f) Nsight Systems also has flags for memory profiling. You can combine these with the Nsight flags from before to understand what allocations are happening at different steps in your model’s lifespan. Use the PyTorch-provided NVTX labels to determine how much memory is saved for backward (these tensors are often called residuals) by a single TransformerBlock in your model. Note the 5 largest contributing operations, and what percentage of the overall memory they contribute.  During the backward pass, all these tensors will be freed, but new gradient tensors are emitted at the same time. Based on your profiles showing how much memory was allocated during the forward pass, and how much memory usage changes for every TransformerBlock in the backward pass, calculate how much memory the produced gradient tensors for a TransformerBlock take. Does the result match what you expect?**
 
 Deliverable: Screenshots from Nsight Systems and a 1-2 paragraph response.
+
+TODO
+
+## Problem (gradient_checkpointing):  Memory-Optimal Gradient Checkpointing (4 points)
+
+**Consider a Transformer with 𝑁 identical blocks stacked sequentially. Without any checkpointing, all 𝑁 blocks’ worth of residuals are kept alive simultaneously, giving 𝑂(𝑁) peak activation memory. We have a free hand to wrap any subset of the forward pass in checkpoint, including nesting checkpoint calls inside one another.**
+
+**(a) What checkpointing strategy minimizes peak activation memory, ignoring the compute cost?  Describe how you would arrange the checkpoint calls (a code sketch is fine), and give the asymptotic peak activation memory and compute of your strategy as a function of 𝑁. Assume the residuals saved by a single block dominate any per-checkpoint bookkeeping.**
+
+Deliverable: A 3-5 sentence description of the strategy and its asymptotic peak memory, plus a short code sketch.
+
+If I ignore compute cost, I would checkpoint only the initial input and
+recursively re-compute all following blocks when doing backward.
+
+```python
+from torch.utils.checkpoint import checkpoint
+from functools
+# assume the block forward is block(x)
+def o1_checkpoint(x, n: int):
+    if n == 1:
+        return block(x)
+    f = partial(o1_checkpoint, n=n-1)
+    x = checkpoint(f, x, use_reentrant=False)
+    return block(x)
+```
+
+**(b) Consider the xl model config with batch size 4 and sequence length 2048 as above. If you only have the time/compute budget to run one step of recomputation (meaning you may not nest checkpoint calls), what is the best checkpointing strategy to reduce peak memory? Profile your run’s peak memory to validate your hypothesis. Compare the peak memory of the next smaller and larger checkpointing block sizes to be sure.**
+
+Deliverable: A 3-5 sentence description of your reasoning along with the measured peak memory for your strategy.
+
+Assuming we'll not checkpoint *within* a transformer block, the optimal strategy should've been to checkpoint the residual to every transformer block. Theoretically, if the blocks are infinitely slice-able, the optimal would be to stop at the point where introducing 1 more checkpoint does not decrease peak activation mem. Assuming:
+G
+```
+N blocks (but infinitely separable)
+residual tensor mem footprint is 1
+each block's activation footprint is m
+```
+
+Then the optimal number of checkpoint is
+```
+argmin_K(K + mN/K), minimized at K = sqrt(m*N)
+```
+
+Without flash attention (which I understand takes out the `d_model ** 2 * c_l` and `c_l ** 2 * d_model` mem blackholes), m is larger than N for XL model (m~=70 while N=32), that the optimal is just to slice into N chunks of 1 transformer blocks.
+
+Smoke run on `small` config with CL-512, BF16 mixed precision:
+- Without any optimization, mem usage on fw-bw peaks at 3.7GiB
+- With compile on each transformer layer, mem usage peaks at 2.7GiB
+- With compile *and* per-layer checkpointing, mem usage peaks at 1.6GiB
+
+Theoretically "raw" activation mem usage should be 2.4GiB, and with full checkpointing it should be 175MB on activation only. So in theory checkpointing should save 2.2GiB, against a measured reduction of 2.1GiB
+
+
+With a checkpoint inserted at any
+
+```
+# no compile, no checkpointing 
+# CL 256
+                  fw     fw-bw  fw-bw-opt
+small_mean  0.223222  0.742219   0.880503
+small_std   0.002731  0.008660   0.026013
+
+# CL 512
+                  fw     fw-bw  fw-bw-opt
+small_mean  0.519028  2.290702   4.958452
+small_std   0.005325  0.275684   0.099407
+
+# compile, no checkpointing
+# CL 256
+                  fw     fw-bw  fw-bw-opt
+small_mean  0.154870  0.532780   0.710786
+small_std   0.000463  0.018181   0.024915
+
+# CL 512
+                  fw     fw-bw  fw-bw-opt
+small_mean  0.324337  0.997056   1.329358
+small_std   0.000402  0.031531   0.054117
+
+# compile, checkpointing
+# CL 256
+                  fw     fw-bw  fw-bw-opt
+small_mean  0.159511  0.651433   0.814780
+small_std   0.000147  0.003435   0.001873
+
+# CL 512
+                  fw     fw-bw  fw-bw-opt
+small_mean  0.306798  1.226523   1.391464
+small_std   0.001718  0.000981   0.001952
+```

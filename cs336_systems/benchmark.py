@@ -150,7 +150,7 @@ def benchmark_full(
         times.append(curtime)
     if record_mem:
         # Save a pickle file to be loaded by PyTorch's online tool.
-        torch.cuda.memory._dump_snapshot(f"{run_prefix}mem_snap.pickle")
+        torch.cuda.memory._dump_snapshot(f"cs336_systems/{run_prefix}mem_snap.pickle")
         # Stop recording history.
         torch.cuda.memory._record_memory_history(enabled=None)
     return times
@@ -177,7 +177,7 @@ def run_benchmark(
     if mode == 'fw-bw-opt' and opt_params is None:
         opt_params = {}
     
-    model = load_model(model_dims, device=device)
+    model = torch.compile(load_model(model_dims, device=device), fullgraph=True)
     opt = None
     if mode == 'fw-bw-opt':
         opt = load_optimizer(opt_params, model, device=device)

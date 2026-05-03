@@ -4,6 +4,8 @@ from einops import rearrange, einsum
 from jaxtyping import Int, Float, Bool
 import numpy as np
 import torch.cuda.nvtx as nvtx
+from torch.utils.checkpoint import checkpoint
+from functools import partial
 
 
 class TransformerLM(nn.Module):
@@ -83,10 +85,25 @@ class TransformerLM(nn.Module):
         token_positions: Int[torch.Tensor, "... seq_len"] | None = None,
     ) -> Float[torch.Tensor, " ... seq_len vocab_size"]:
         cur_x = self.token_embeddings(in_indices)
-        for layer in self.layers:
-            cur_x = layer(cur_x, token_positions=token_positions)
+        # for layer in self.layers:
+        #     cur_x = layer(cur_x, token_positions=token_positions)
+        cur_x = self.run_checkpoint(cur_x, token_positions=token_positions)
         cur_x = self.lm_head(self.ln_final(cur_x))
         return cur_x # softmax(cur_x, i=-1)
+    
+    def run_layers(self, x, start_i, end_i, token_positions=None):
+        for i in range(start_i, end_i):
+            x = self.layers[i](x, token_positions=token_positions)
+        return x
+    
+    def run_checkpoint(self, x, token_positions=None):
+        cp_stride = 1
+        cp_starts = list(range(0, self.num_layers, cp_stride))
+        cp_ranges = zip(cp_starts, cp_starts[1:]+[self.num_layers])
+        for start_i, end_i in cp_ranges:
+            f = partial(self.run_layers, start_i=start_i, end_i=end_i, token_positions=token_positions)
+            x = checkpoint(f, x, use_reentrant=False)
+        return x
 
 
 class PreNormTransformer(nn.Module):
@@ -268,6 +285,9 @@ def annotated_scaled_dot_product_attention(
     denom = np.sqrt(Q.shape[-1])
     if mask is not None:
         QK_masked = (QK / denom).masked_fill(~mask, -torch.inf)
+    else:
+        QK_masked = QK / denom
+
     with nvtx.range('attn_softmax'):
         sm = softmax(QK_masked, -1)
     with nvtx.range('attn_out'):
@@ -285,6 +305,9 @@ def scaled_dot_product_attention(
     denom = np.sqrt(Q.shape[-1])
     if mask is not None:
         QK_masked = (QK / denom).masked_fill(~mask, -torch.inf)
+    else:
+        QK_masked = QK / denom
+
     sm = softmax(QK_masked, -1)
     return einsum(sm, V, '... queries values, ... values d_v -> ... queries d_v')
 
@@ -327,9 +350,9 @@ class RotaryPositionalEmbedding(nn.Module):
     ) -> Float[torch.Tensor, '... seq_len d_k']:
         odd_x = x[..., ::2]
         even_x = x[..., 1::2]
-        if int(token_positions.max()) >= self.max_seq_len:
-            rounded_seq_len = 2 ** int(np.ceil(np.log2(float(token_positions.max()+1))))
-            self._update_cache(rounded_seq_len)
+        # if int(token_positions.max()) >= self.max_seq_len:
+        #     rounded_seq_len = 2 ** int(np.ceil(np.log2(float(token_positions.max()+1))))
+        #     self._update_cache(rounded_seq_len)
         cosines = self.cosines[token_positions]
         sines = self.sines[token_positions]
         odd_out = cosines * odd_x - sines * even_x
