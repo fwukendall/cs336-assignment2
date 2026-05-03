@@ -8,6 +8,17 @@ import numpy as np
 import pandas as pd
 import fire
 import torch.cuda.nvtx as nvtx
+from contextlib import nullcontext
+# cs336_bmine.langmodel.scaled_dot_product_attention = cs336_bmine.langmodel.annotated_scaled_dot_product_attention
+
+MODEL_SETUPS = {
+    # name: d_model d_ff num_layers num_heads
+    'small': (768, 3072, 12, 12),
+    'medium': (1024, 4096, 24, 16),
+    'large': (1280, 5120, 36, 20),
+    'xl': (2560, 10240, 32, 32),
+    # '10B': (4608, 12288, 50, 36),
+}
 
 def load_model(model_dims: dict, device='cuda') -> torch.nn.Module:
     model = cs336_bmine.langmodel.TransformerLM(**model_dims, device=device)
@@ -28,23 +39,45 @@ def benchmark_fw(
     get_batch: Callable,
     warmup: int,
     n_steps: int,
+    cast_bf16: bool = False,
+    mark_bmmode: bool = True,
+    record_mem: bool = False,
+    run_name: str = '',
 ) -> list[float]:
+
     device = model.device
     model.eval()
+    context = nullcontext()
+    if cast_bf16:
+        context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
     for _ in range(warmup):
         x, _ = get_batch()
-        _ = model(x)
+        with context:
+            _ = model(x)
 
     times = []
+    torch.cuda.cudart().cudaProfilerStart()
+
+    if record_mem:
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
     for _ in range(n_steps):
         x, _ = get_batch()
-        with nvtx.range('bmmode_fw'):
+        with (nullcontext() if not mark_bmmode else nvtx.range('bmmode_fw')):
             torch.cuda.synchronize(device)
             start_t = timeit.default_timer()
-            _ = model(x)
+            with context:
+                _ = model(x)
             torch.cuda.synchronize(device)
             end_t = timeit.default_timer()
         times.append(end_t - start_t)
+
+    if record_mem:
+        # Save a pickle file to be loaded by PyTorch's online tool.
+        run_prefix = 'fw_' + (f'{run_name}_' if run_name != '' else '')
+        torch.cuda.memory._dump_snapshot(f"cs336_systems/{run_prefix}mem_snap.pickle")
+        # Stop recording history.
+        torch.cuda.memory._record_memory_history(enabled=None)
+    torch.cuda.cudart().cudaProfilerStop()
     return times
 
 def benchmark_full(
@@ -53,20 +86,33 @@ def benchmark_full(
     warmup: int,
     n_steps: int,
     opt: torch.optim.Optimizer | None = None,
+    cast_bf16: bool = False,
+    record_mem: bool = False,
+    run_name: str = '',
 ):
     device = model.device
+    context = nullcontext()
+    if cast_bf16:
+        context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
     model.train()
     for _ in range(warmup):
         if opt is not None:
             opt.zero_grad(set_to_none=True)
         x, y = get_batch()
-        logits = model(x)
-        ce = cs336_bmine.train_util.cross_entropy(logits, y)
+        with context:
+            logits = model(x)
+            ce = cs336_bmine.train_util.cross_entropy(logits, y)
         ce.backward()
         if opt is not None:
             opt.step()
     
     times = []
+    if opt is not None:
+        run_prefix = 'opt_' + (f'{run_name}_' if run_name != '' else '')
+    else:
+        run_prefix = 'bw_' + (f'{run_name}_' if run_name != '' else '')
+    if record_mem:
+        torch.cuda.memory._record_memory_history(max_entries=1000000)
     for _ in range(n_steps):
         curtime = 0.
         x, y = get_batch()
@@ -76,13 +122,15 @@ def benchmark_full(
         with nvtx.range('bmmode_fw_withgrad'):
             torch.cuda.synchronize(device)
             start_t = timeit.default_timer()
-            logits = model(x)
-
+            with context:
+                logits = model(x)
             torch.cuda.synchronize(device)
             pt = timeit.default_timer()
         curtime += pt - start_t
 
-        ce = cs336_bmine.train_util.cross_entropy(logits, y)
+        with context:
+            ce = cs336_bmine.train_util.cross_entropy(logits, y)
+
         with nvtx.range('bmmode_bw'):
             torch.cuda.synchronize(device)
             start_t = timeit.default_timer()
@@ -100,6 +148,11 @@ def benchmark_full(
                 pt = timeit.default_timer()
             curtime += pt - start_t
         times.append(curtime)
+    if record_mem:
+        # Save a pickle file to be loaded by PyTorch's online tool.
+        torch.cuda.memory._dump_snapshot(f"{run_prefix}mem_snap.pickle")
+        # Stop recording history.
+        torch.cuda.memory._record_memory_history(enabled=None)
     return times
 
 
@@ -108,10 +161,15 @@ def run_benchmark(
     n_steps: int = 10,
     batch_size: int = 4,
     mode: Literal['fw', 'fw-bw', 'fw-bw-opt'] = 'fw',
-    model_dims: dict = {},
+    model_dims: dict | str = 'small',
     opt_params: dict | None = None,
     device: torch.device | None = None,
+    cast_bf16: bool = False,
+    record_mem: bool = False,
+    run_name: str = '',
 ) -> list[float]:
+    if isinstance(model_dims, str):
+        model_dims = read_model_setup(MODEL_SETUPS[model_dims])
 
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -136,13 +194,21 @@ def run_benchmark(
     )
 
     if mode == 'fw':
-        times = benchmark_fw(model, get_batch, warmup, n_steps)
+        times = benchmark_fw(model, get_batch, warmup, n_steps, cast_bf16,
+                             record_mem=record_mem, run_name=run_name)
     else:
         times = benchmark_full(
-            model, get_batch, warmup, n_steps, opt,
+            model, get_batch, warmup, n_steps, opt, cast_bf16,
+            record_mem=record_mem, run_name=run_name
         )
     return times
 
+def read_model_setup(mdims) -> dict:
+    keys = ('d_model', 'd_ff',  'num_layers', 'num_heads')
+    model_dims = dict(zip(keys, mdims))
+    model_dims['context_length'] = 512
+    model_dims['vocab_size'] = 10000
+    return model_dims
 
 def run_preset(
     warmup: int = 5,
@@ -151,23 +217,16 @@ def run_preset(
     context_length: int = 512,
     vocab_size: int = 10000,
     batch_size: int = 4,
+    cast_bf16: bool = False,
+    record_mem: bool = False,
 ):
-    setups = {
-        # name: d_model d_ff num_layers num_heads
-        'small': (768, 3072, 12, 12),
-        'medium': (1024, 4096, 24, 16),
-        'large': (1280, 5120, 36, 20),
-        'xl': (2560, 10240, 32, 32),
-        # '10B': (4608, 12288, 50, 36),
-    }
-
-    keys = ('d_model', 'd_ff',  'num_layers', 'num_heads')
+    setups = MODEL_SETUPS
     model_dims_dict = {}
     for name, mdims in setups.items():
         if on_laptop and name in ('10B', 'xl', 'large', 'medium'):
             print(f"Won't be able to run {name} on your measly 3050")
             continue
-        model_dims = dict(zip(keys, mdims))
+        model_dims = read_model_setup(mdims)
         model_dims['context_length'] = context_length
         model_dims['vocab_size'] = vocab_size
         model_dims_dict[name] = model_dims
@@ -179,6 +238,7 @@ def run_preset(
         stats_all[mode] = {}
         for name, model_dims in model_dims_dict.items():
             print(f'benchmarking {mode} on {name}')
+            run_name = f'{"fp32" if not cast_bf16 else "bf16"}_CL{context_length}_{name}'
             times = run_benchmark(
                 warmup=warmup,
                 n_steps=n_steps,
@@ -186,6 +246,9 @@ def run_preset(
                 mode=mode,
                 model_dims=model_dims,
                 device=device,
+                cast_bf16=cast_bf16,
+                record_mem=record_mem,
+                run_name=run_name,
             )
             m, s = np.mean(times), np.std(times)
             stats_all[mode][name+'_mean'] = m
@@ -196,3 +259,4 @@ def run_preset(
 
 if __name__ == '__main__':
     fire.Fire()
+

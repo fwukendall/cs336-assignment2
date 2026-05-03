@@ -3,6 +3,7 @@ from torch import nn, sigmoid
 from einops import rearrange, einsum
 from jaxtyping import Int, Float, Bool
 import numpy as np
+import torch.cuda.nvtx as nvtx
 
 
 class TransformerLM(nn.Module):
@@ -255,6 +256,23 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
     #     return super().load_state_dict(state_dict, strict, assign)
 
+def annotated_scaled_dot_product_attention(
+    Q: Float[torch.Tensor, " ... queries d_k"],
+    K: Float[torch.Tensor, " ... keys d_k"],
+    V: Float[torch.Tensor, " ... values d_v"],
+    mask: Bool[torch.Tensor, " ... queries keys"] | None = None,
+) -> Float[torch.Tensor, " ... queries d_v"]:
+    assert K.shape[-2] == V.shape[-2]
+    with nvtx.range('attn_matmul'):
+        QK = einsum(Q, K, '... queries d_k, ... keys d_k -> ... queries keys')
+    denom = np.sqrt(Q.shape[-1])
+    if mask is not None:
+        QK_masked = (QK / denom).masked_fill(~mask, -torch.inf)
+    with nvtx.range('attn_softmax'):
+        sm = softmax(QK_masked, -1)
+    with nvtx.range('attn_out'):
+        out = einsum(sm, V, '... queries values, ... values d_v -> ... queries d_v')
+    return out
 
 def scaled_dot_product_attention(
     Q: Float[torch.Tensor, " ... queries d_k"],
