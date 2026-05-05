@@ -278,11 +278,16 @@ def annotated_scaled_dot_product_attention(
     K: Float[torch.Tensor, " ... keys d_k"],
     V: Float[torch.Tensor, " ... values d_v"],
     mask: Bool[torch.Tensor, " ... queries keys"] | None = None,
+    is_causal: bool = False,
 ) -> Float[torch.Tensor, " ... queries d_v"]:
     assert K.shape[-2] == V.shape[-2]
     with nvtx.range('attn_matmul'):
         QK = einsum(Q, K, '... queries d_k, ... keys d_k -> ... queries keys')
     denom = np.sqrt(Q.shape[-1])
+    if is_causal:
+        assert mask is None
+        mask = torch.tril(torch.ones(Q.shape[-2], Q.shape[-2], dtype=bool, device=Q.device))
+    
     if mask is not None:
         QK_masked = (QK / denom).masked_fill(~mask, -torch.inf)
     else:
@@ -299,10 +304,15 @@ def scaled_dot_product_attention(
     K: Float[torch.Tensor, " ... keys d_k"],
     V: Float[torch.Tensor, " ... values d_v"],
     mask: Bool[torch.Tensor, " ... queries keys"] | None = None,
+    is_causal: bool = False,
 ) -> Float[torch.Tensor, " ... queries d_v"]:
     assert K.shape[-2] == V.shape[-2]
     QK = einsum(Q, K, '... queries d_k, ... keys d_k -> ... queries keys')
     denom = np.sqrt(Q.shape[-1])
+    if is_causal:
+        assert mask is None
+        mask = torch.tril(torch.ones(Q.shape[-2], Q.shape[-2], dtype=bool, device=Q.device))
+
     if mask is not None:
         QK_masked = (QK / denom).masked_fill(~mask, -torch.inf)
     else:

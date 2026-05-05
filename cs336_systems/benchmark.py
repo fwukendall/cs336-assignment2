@@ -268,6 +268,7 @@ def run_attention(
     mem_filename: str | None = None,
     attn_impl: Literal['bmine', 'basic', 'torch', 'flash'] = 'bmine',
     do_compile: bool = False,
+    check_correctness: bool = False,
 ):
     batch_size = 8
     device = 'cuda'
@@ -277,8 +278,8 @@ def run_attention(
         torch.rand((batch_size, seq_len, d_k,), device=device, requires_grad=True),
         torch.rand((batch_size, seq_len, d_k,), device=device,),
     )
-    mask = (torch.tril(torch.ones(seq_len, seq_len)) == 1).to(device)
-    mask = mask.view(1, seq_len, seq_len)
+    # mask = (torch.tril(torch.ones(seq_len, seq_len)) == 1).to(device)
+    # mask = mask.view(1, seq_len, seq_len)
     if attn_impl == 'bmine':
         attn_func = cs336_bmine.langmodel.scaled_dot_product_attention
     elif attn_impl == 'basic':
@@ -287,9 +288,11 @@ def run_attention(
     elif attn_impl == 'torch':
         from torch.nn.functional import scaled_dot_product_attention as torch_attn
         attn_func = torch_attn
-    else:
-        raise NotImplementedError(attn_impl)
+    elif attn_impl == 'flash':
+        from cs336_systems.flash import falsh_attention_v2_no_triton as flash_attn
+        attn_func = flash_attn
     
+
     if do_compile:
         attn_func = torch.compile(attn_func)
 
@@ -298,29 +301,37 @@ def run_attention(
     if cast_bf16:
         context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
 
+    print('Starting Warmup!')
     for _ in range(warmup):
         Q, K, V, Y = get_batch()
         with context:
-            X = attn_func(Q, K, V, mask)
+            X = attn_func(Q, K, V, is_causal=True)
             if bm_mode == 'bw':
                 mse = torch.nn.functional.mse_loss(X, Y)
         if bm_mode == 'bw':
             mse.backward()
         
 
+    print('Finished Warmup!')
     times = []
     if bm_mode == 'fw':
         if mem_filename is not None:
             torch.cuda.memory._record_memory_history(max_entries=1000000)
-        for _ in range(n_steps):
+        for i in range(n_steps):
             Q, K, V, _ = get_batch()
             torch.cuda.synchronize(device)
             start_t = timeit.default_timer()
             with context:
-                _ = attn_func(Q, K, V, mask)
+                _ = attn_func(Q, K, V, is_causal=True)
             torch.cuda.synchronize(device)
             end_t = timeit.default_timer()
             times.append(end_t - start_t)
+
+            if check_correctness and i % 20 == 0:
+                Yh0 = cs336_bmine.langmodel.scaled_dot_product_attention(Q, K, V, is_causal=True)
+                Yh1 = attn_func(Q, K, V, is_causal=True)
+                print('Closeness check!')
+                print(torch.allclose(Yh0, Yh1))
 
         if mem_filename is not None:
             torch.cuda.memory._dump_snapshot(f"cs336_systems/{mem_filename}_mem_snap.pickle")
@@ -330,7 +341,7 @@ def run_attention(
         for _ in range(n_steps):
             Q, K, V, Y = get_batch()
             with context:
-                X = attn_func(Q, K, V, mask)
+                X = attn_func(Q, K, V, is_causal=True)
                 mse = torch.nn.functional.mse_loss(X, Y)
             torch.cuda.synchronize(device)
             start_t = timeit.default_timer()
@@ -349,6 +360,7 @@ def run_attn_preset(
     attn_impl: Literal['bmine', 'basic', 'torch', 'flash'] = 'bmine',
     do_compile: bool = False,
     out_prefix: str | None = None,
+    check_correctness: bool = False,
 ):
     if out_prefix is None:
         out_prefix = 'laptop'
@@ -372,12 +384,18 @@ def run_attn_preset(
         for seq_len in seq_len_list:
             run_name = f'dk{d_k}_cl{seq_len}_{base_name}'
             for bm_mode in ['fw', 'bw']:
+                if attn_impl == 'flash' and bm_mode == 'bw':
+                    continue
                 OOM_list = OOM_start[bm_mode]
                 should_run = True
                 for oom_dk, oom_seqlen in OOM_list:
                     if d_k >= oom_dk and seq_len >= oom_seqlen:
                         should_run = False
                         break
+                if (d_k, seq_len) in OOM_start['fw']:
+                    should_run = False
+                    OOM_start['bw'].append((d_k, seq_len))
+
                 if not should_run:
                     print('Skipping', bm_mode, run_name)
                     times_dict[bm_mode][run_name] = 'OOM'
@@ -397,6 +415,7 @@ def run_attn_preset(
                         mem_filename=mem_filename,
                         attn_impl=attn_impl,
                         do_compile=do_compile,
+                        check_correctness=check_correctness,
                     )
                 except torch.cuda.OutOfMemoryError:
                     OOM_start[bm_mode].append((d_k, seq_len))
@@ -421,7 +440,7 @@ def run_attn_preset(
     summ_df = pd.DataFrame(summ_dict)
     print(summ_df)
     out_filename = f'{out_prefix}_{base_name}_summ.csv' 
-    summ_df.to_csv(out_filename, index=None)
+    summ_df.to_csv(out_filename)
     print('Written', out_filename)
     return
 

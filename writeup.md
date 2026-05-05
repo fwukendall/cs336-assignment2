@@ -3,6 +3,7 @@
     - with autocast bf16, run benchmarking script of all model sizes, context-length 512 (small, medium, large, XL)
     - Run memory profiling for XL-128 and XL-512
     - Run memory profiling for compiled-checkpointed XL-2048, and compare XL-512
+    - Run benchmark-attn for bmine attn impl (compile, no-compile)
 
 
 ## Problem (benchmarking_script):  Benchmarking Script (4 points)
@@ -399,3 +400,106 @@ small_std   0.001718  0.000981   0.001952
 **Depending on your GPU, some of these configurations are expected to run out of memory.  Report the timings (or out-of-memory errors) you get for these configurations. At what size do you get out-of-memory errors? Do the accounting for the memory usage of attention in one of the smallest configurations you find that runs out of memory (you can use the equations for memory usage of Transformers from Assignment 1). How does the memory saved for backward change with the sequence length? What would you do to eliminate this memory cost?**
 
 Deliverable: A table with your timings, your calculations for the memory usage, and a 1-2 paragraph response.
+
+| d_k,seq_len   |   afunc-bmine_nocomp_bf16_fw |   afunc-bmine_nocomp_bf16_bw |
+|:--------------|-----------------------------:|-----------------------------:|
+| (16, 256)     |                  0.000941632 |                   0.00173682 |
+| (16, 1024)    |                  0.00965486  |                   0.0175487  |
+| (16, 4096)    |                  0.0678801   |                   0.147964   |
+| (16, 8192)    |                nan           |                 nan          |
+| (16, 16384)   |                nan           |                 nan          |
+| (32, 256)     |                  0.00117213  |                   0.00146997 |
+| (32, 1024)    |                  0.00366305  |                   0.00719732 |
+| (32, 4096)    |                  0.198743    |                   0.755467   |
+| (32, 8192)    |                nan           |                 nan          |
+| (32, 16384)   |                nan           |                 nan          |
+| (64, 256)     |                  0.000777457 |                   0.0012469  |
+| (64, 1024)    |                  0.00349827  |                   0.00712543 |
+| (64, 4096)    |                  0.198169    |                   0.74446    |
+| (64, 8192)    |                nan           |                 nan          |
+| (64, 16384)   |                nan           |                 nan          |
+| (128, 256)    |                  0.00059489  |                   0.00123288 |
+| (128, 1024)   |                  0.00363875  |                   0.00756303 |
+| (128, 4096)   |                  0.200574    |                   0.75569    |
+| (128, 8192)   |                nan           |                 nan          |
+| (128, 16384)  |                nan           |                 nan          |
+
+TODO: run this on A100
+
+
+## Problem (torch_compile):  Torch Compile (2 points)
+**(a) Extend your attention benchmarking script to include a compiled version of your PyTorch implementation of attention, and compare its performance to the uncompiled version with the same configuration as the pytorch_attention problem above.**
+
+Deliverable: A table comparing your forward and backward pass timings for your compiled attention module with the uncompiled version from the pytorch_attention problem above.
+
+On Laptop
+
+| d_k,seq_len   |   fw_nocompile |   bw_nocompile |   fw_docompile |   bw_docompile |
+|:--------------|---------------:|---------------:|---------------:|---------------:|
+| (16, 256)     |           0.94 |           1.74 |           0.68 |           1.1  |
+| (16, 1024)    |           9.65 |          17.55 |           1.59 |           2.29 |
+| (16, 4096)    |          67.88 |         147.96 |          16.57 |          27.45 |
+| (32, 256)     |           1.17 |           1.47 |           0.4  |           1.17 |
+| (32, 1024)    |           3.66 |           7.2  |           1.13 |           2.39 |
+| (32, 4096)    |         198.74 |         755.47 |          17.71 |          30.77 |
+| (64, 256)     |           0.78 |           1.25 |           0.75 |           0.85 |
+| (64, 1024)    |           3.5  |           7.13 |           1.39 |           2.37 |
+| (64, 4096)    |         198.17 |         744.46 |          15.55 |          30.79 |
+| (128, 256)    |           0.59 |           1.23 |           0.91 |           1.22 |
+| (128, 1024)   |           3.64 |           7.56 |           1.48 |           2.88 |
+| (128, 4096)   |         200.57 |         755.69 |          21.17 |          38.83 |
+
+TODO: on A100
+
+**(b) Now, compile your entire Transformer model in your end-to-end benchmarking script. How does the performance of the forward pass change? What about the combined forward and backward passes and optimizer steps?**
+
+Deliverable: A table comparing your vanilla and compiled Transformer model.
+
+TODO
+
+
+## Problem (flash_forward):  FlashAttention-2 Forward Pass (15 points)
+**(a) Write a pure PyTorch (no Triton) autograd.Function that implements the FlashAttention-2 forward pass. This will be a lot slower than the regular PyTorch implementation, but will help you debug your Triton kernel. Your implementation should take input 𝑸, 𝑲, and 𝑽 as well as a flag is_causal and produce the output 𝑶 and the logsumexp value 𝐿. You can ignore the is_causal flag for this task. The autograd.Function forward should then save 𝐿, 𝑄, 𝐾, 𝑉 , 𝑂 for the backward pass and return 𝑂. Remember that the implementation of the forward method of autograd.Function always takes the context as its first parameter. Any autograd.Function class needs to implement a backward method, but for now you can make it just raise NotImplementedError. If you need something to compare against, you can implement Equation 4 to Equation 6 and Equation 12 in PyTorch and compare your outputs. The interface is then `def forward(ctx, Q, K, V, is_causal=False)`. Determine your own tile sizes, but make sure they are at least of size 16 × 16. We will always test your code with dimensions that are powers of 2 and at least 16, so you don’t need to worry about out-ofbounds accesses.**
+
+Deliverable: A torch.autograd.Function subclass that implements FlashAttention-2 in the forward pass. To test your code, implement [adapters.get_flashattention_autograd_function_pytorch] . Then, run the test with uv run pytest -k test_flash_forward_pass_pytorch and make sure your implementation passes it.
+
+(b) Write a Triton kernel for the forward pass of FlashAttention-2 following Algorithm 1. Then, write another subclass of torch.autograd.Function that calls this (fused) kernel in the forward pass, instead of computing the result in PyTorch. A few problem-specific tips:
+
+• To debug, we suggest comparing the results of each Triton operation you perform with the tiled PyTorch implementation you wrote in part (a).
+• Your launch grid should be set as (𝑇𝑞 ,batch_size), meaning each Triton program instance will load only elements from a single batch index, and only read/write to a single query tile of 𝑸, 𝑶, and 𝐿.
+• The kernel should only have a single loop, which will iterate key tiles 1 ≤ 𝑗 ≤ 𝑇𝑘.
+• Advance block pointers at the end of the loop.
+• Use the function declaration below (using the block pointer we give you, you should be able to infer the setup of the rest of the pointers)
+
+```python
+@triton.jit
+def flash_fwd_kernel(
+    Q_ptr, K_ptr, V_ptr,
+    O_ptr, L_ptr,
+    stride_qb, stride_qq, stride_qd,
+    stride_kb, stride_kk, stride_kd,
+    stride_vb, stride_vk, stride_vd,
+    stride_ob, stride_oq, stride_od,
+    stride_lb, stride_lq,
+    N_QUERIES, N_KEYS,
+    scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+):
+    # Program indices
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+    
+    # Offset each pointer with the corresponding batch index
+    # multiplied with the batch stride for each tensor
+    Q_block_ptr = tl.make_block_ptr(
+        Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+ 
+```
