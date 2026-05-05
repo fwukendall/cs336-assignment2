@@ -258,6 +258,7 @@ Deliverable: A 2-3 sentence response with your timings and commentary.
 
 TODO
 
+
 ## Problem (memory_profiling):  Memory Profiling (4 points)
 Profile your complete training step of forward pass, backward pass, and optimizer step of the xl model from Table 1 with context lengths of 128 and 512.
 **(a) Add an option to your profiling script to run your model through the memory profiler.  It may be helpful to reuse some of your previous infrastructure (e.g., to activate mixed-precision, load specific model sizes, etc). Then, run your script to get a memory profile of the xl model when either doing inference only (just forward pass) or a full training step. What do your memory timelines look like? Can you tell which stage is running based on the peaks you see?**
@@ -281,7 +282,11 @@ TODO
 
 Deliverable: A 1-2 sentence response with your derivation.
 
-TODO
+```
+size_128 = 4 * 4 * 128 * 2560 = 5 MiB
+size_512 = 4 * 4 * 512 * 2560 = 20 MiB
+size_2048 = 4 * 4 * 2048 * 2560 = 80 MiB
+```
 
 **(e) Now look closely at the “Active Memory Timeline” from pytorch.org/memory_viz of a memory snapshot of the xl model doing a forward pass. When you reduce the “Detail” level, the tool hides the smallest allocations to the corresponding level (e.g., putting “Detail” at 10% only shows the 10% largest allocations). What is the size of the largest allocations shown? Looking through the stack trace, can you tell where those allocations come from?**
 
@@ -381,3 +386,16 @@ small_std   0.000147  0.003435   0.001873
 small_mean  0.306798  1.226523   1.391464
 small_std   0.001718  0.000981   0.001952
 ```
+
+## Problem (pytorch_attention):  PyTorch Attention Benchmarking (2 points)
+**(a) Benchmark your attention implementation at different scales. Write a script that will:**
+- (i) Fix the batch size to 8 and don’t use multihead attention (i.e. remove the head dimension).
+- (ii) Iterate through the cartesian product of [16, 32, 64, 128] for the head embedding dimension 𝑑model, and [256, 1024, 4096, 8192, 16384] for the sequence length.
+- (iii) Create random inputs 𝑄, 𝐾, 𝑉 for the appropriate size.
+- (iv) Time 100 forward passes through attention using the inputs.
+- (v) Measure how much memory is in use before the backward pass starts, and time 100 backward passes.
+- (vi) Make sure to warm up, and to call torch.cuda.synchronize() after each forward/backward pass.
+
+**Depending on your GPU, some of these configurations are expected to run out of memory.  Report the timings (or out-of-memory errors) you get for these configurations. At what size do you get out-of-memory errors? Do the accounting for the memory usage of attention in one of the smallest configurations you find that runs out of memory (you can use the equations for memory usage of Transformers from Assignment 1). How does the memory saved for backward change with the sequence length? What would you do to eliminate this memory cost?**
+
+Deliverable: A table with your timings, your calculations for the memory usage, and a 1-2 paragraph response.

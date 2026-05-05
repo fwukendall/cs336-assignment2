@@ -9,7 +9,7 @@ import pandas as pd
 import fire
 import torch.cuda.nvtx as nvtx
 from contextlib import nullcontext
-# cs336_bmine.langmodel.scaled_dot_product_attention = cs336_bmine.langmodel.annotated_scaled_dot_product_attention
+import pickle
 
 MODEL_SETUPS = {
     # name: d_model d_ff num_layers num_heads
@@ -255,6 +255,174 @@ def run_preset(
             stats_all[mode][name+'_std'] = s
     out_df = pd.DataFrame(stats_all)
     print(out_df)
+    return
+
+
+def run_attention(
+    d_k: int = 16,
+    seq_len: int = 256,
+    warmup: int = 20,
+    n_steps: int = 100,
+    bm_mode: Literal['fw', 'bw'] = 'fw',
+    cast_bf16: bool = True,
+    mem_filename: str | None = None,
+    attn_impl: Literal['bmine', 'basic', 'torch', 'flash'] = 'bmine',
+    do_compile: bool = False,
+):
+    batch_size = 8
+    device = 'cuda'
+    get_batch = lambda: (
+        torch.rand((batch_size, seq_len, d_k,), device=device, requires_grad=True),
+        torch.rand((batch_size, seq_len, d_k,), device=device, requires_grad=True),
+        torch.rand((batch_size, seq_len, d_k,), device=device, requires_grad=True),
+        torch.rand((batch_size, seq_len, d_k,), device=device,),
+    )
+    mask = (torch.tril(torch.ones(seq_len, seq_len)) == 1).to(device)
+    mask = mask.view(1, seq_len, seq_len)
+    if attn_impl == 'bmine':
+        attn_func = cs336_bmine.langmodel.scaled_dot_product_attention
+    elif attn_impl == 'basic':
+        from cs336_basics.model import scaled_dot_product_attention as basic_attn
+        attn_func = basic_attn
+    elif attn_impl == 'torch':
+        from torch.nn.functional import scaled_dot_product_attention as torch_attn
+        attn_func = torch_attn
+    else:
+        raise NotImplementedError(attn_impl)
+    
+    if do_compile:
+        attn_func = torch.compile(attn_func)
+
+    # warmup
+    context = nullcontext()
+    if cast_bf16:
+        context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+
+    for _ in range(warmup):
+        Q, K, V, Y = get_batch()
+        with context:
+            X = attn_func(Q, K, V, mask)
+            if bm_mode == 'bw':
+                mse = torch.nn.functional.mse_loss(X, Y)
+        if bm_mode == 'bw':
+            mse.backward()
+        
+
+    times = []
+    if bm_mode == 'fw':
+        if mem_filename is not None:
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
+        for _ in range(n_steps):
+            Q, K, V, _ = get_batch()
+            torch.cuda.synchronize(device)
+            start_t = timeit.default_timer()
+            with context:
+                _ = attn_func(Q, K, V, mask)
+            torch.cuda.synchronize(device)
+            end_t = timeit.default_timer()
+            times.append(end_t - start_t)
+
+        if mem_filename is not None:
+            torch.cuda.memory._dump_snapshot(f"cs336_systems/{mem_filename}_mem_snap.pickle")
+            torch.cuda.memory._record_memory_history(enabled=None)
+    
+    else:
+        for _ in range(n_steps):
+            Q, K, V, Y = get_batch()
+            with context:
+                X = attn_func(Q, K, V, mask)
+                mse = torch.nn.functional.mse_loss(X, Y)
+            torch.cuda.synchronize(device)
+            start_t = timeit.default_timer()
+            mse.backward()
+            torch.cuda.synchronize(device)
+            end_t = timeit.default_timer()
+            times.append(end_t - start_t)
+
+    return times
+
+def run_attn_preset(
+    warmup: int = 20,
+    n_steps: int = 100,
+    cast_bf16: bool = True,
+    mem_prefix: str | None = None,
+    attn_impl: Literal['bmine', 'basic', 'torch', 'flash'] = 'bmine',
+    do_compile: bool = False,
+    out_prefix: str | None = None,
+):
+    if out_prefix is None:
+        out_prefix = 'laptop'
+    if mem_prefix is None:
+        mem_prefix = 'laptop'
+
+    d_k_list = [16, 32, 64, 128]
+    seq_len_list = [256, 1024, 4096, 8192, 16384]
+    # d_k_list = [16, 32] # , 64, 128]
+    # seq_len_list = [256, 1024] # , 4096, 8192, 16384]
+    mem_err_list = []
+    type_kw = 'bf16' if cast_bf16 else 'fp32'
+    comp_kw = 'docomp' if do_compile else 'nocomp'
+    base_name = f'afunc-{attn_impl}_{comp_kw}_{type_kw}'
+    times_dict = {
+        'fw': {},
+        'bw': {},
+    }
+    OOM_start = {'fw': [], 'bw': []}
+    for d_k in d_k_list:
+        for seq_len in seq_len_list:
+            run_name = f'dk{d_k}_cl{seq_len}_{base_name}'
+            for bm_mode in ['fw', 'bw']:
+                OOM_list = OOM_start[bm_mode]
+                should_run = True
+                for oom_dk, oom_seqlen in OOM_list:
+                    if d_k >= oom_dk and seq_len >= oom_seqlen:
+                        should_run = False
+                        break
+                if not should_run:
+                    print('Skipping', bm_mode, run_name)
+                    times_dict[bm_mode][run_name] = 'OOM'
+                    continue
+                try:
+                    if bm_mode == 'fw':
+                        mem_filename = f'{mem_prefix}_{run_name}'
+                    else:
+                        mem_filename = None
+                    times = run_attention(
+                        d_k=d_k,
+                        seq_len=seq_len,
+                        warmup=warmup,
+                        n_steps=n_steps,
+                        bm_mode=bm_mode,
+                        cast_bf16=cast_bf16,
+                        mem_filename=mem_filename,
+                        attn_impl=attn_impl,
+                        do_compile=do_compile,
+                    )
+                except torch.cuda.OutOfMemoryError:
+                    OOM_start[bm_mode].append((d_k, seq_len))
+                    print(f'OOM on {bm_mode} {run_name}') 
+                    mem_err_list.append(f'{bm_mode}_{run_name}')
+                    times_dict[bm_mode][run_name] = 'OOM'
+                    continue
+                times_dict[bm_mode][run_name] = times
+    out_filename = f'{out_prefix}_{base_name}_times.pkl' 
+    with open(out_filename, 'wb') as out:
+        pickle.dump(times_dict, out)
+        print('Written', out_filename)
+    print(base_name)
+    summ_dict = {f'{base_name}_fw': {}, f'{base_name}_bw': {}}
+    for bm_mode, bm_times in times_dict.items():
+        for run_name, times in bm_times.items():
+            run_abbr = run_name.split(f'_{base_name}')[0]
+            if times == 'OOM':
+                summ_dict[f'{base_name}_{bm_mode}'][run_abbr] = np.nan
+            else:
+                summ_dict[f'{base_name}_{bm_mode}'][run_abbr] = np.mean(times)
+    summ_df = pd.DataFrame(summ_dict)
+    print(summ_df)
+    out_filename = f'{out_prefix}_{base_name}_summ.csv' 
+    summ_df.to_csv(out_filename, index=None)
+    print('Written', out_filename)
     return
 
 if __name__ == '__main__':
