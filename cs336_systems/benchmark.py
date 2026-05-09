@@ -361,6 +361,7 @@ def run_attn_preset(
     do_compile: bool = False,
     out_prefix: str | None = None,
     check_correctness: bool = False,
+    record_mem: bool = True,
 ):
     if out_prefix is None:
         out_prefix = 'laptop'
@@ -369,7 +370,7 @@ def run_attn_preset(
 
     d_k_list = [16, 32, 64, 128]
     seq_len_list = [256, 1024, 4096, 8192, 16384]
-    # d_k_list = [16, 32] # , 64, 128]
+    d_k_list = [64, 128]
     # seq_len_list = [256, 1024] # , 4096, 8192, 16384]
     mem_err_list = []
     type_kw = 'bf16' if cast_bf16 else 'fp32'
@@ -404,6 +405,9 @@ def run_attn_preset(
                     if bm_mode == 'fw':
                         mem_filename = f'{mem_prefix}_{run_name}'
                     else:
+                        mem_filename = None
+                    
+                    if not record_mem:
                         mem_filename = None
                     times = run_attention(
                         d_k=d_k,
