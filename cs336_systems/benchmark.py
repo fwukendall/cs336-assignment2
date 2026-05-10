@@ -291,6 +291,9 @@ def run_attention(
     elif attn_impl == 'flash':
         from cs336_systems.flash import falsh_attention_v2_no_triton as flash_attn
         attn_func = flash_attn
+    elif attn_impl == 'flash-triton':
+        from cs336_systems.flash import falsh_attention_v2_triton as flash_attn
+        attn_func = flash_attn
     
 
     if do_compile:
@@ -357,7 +360,7 @@ def run_attn_preset(
     n_steps: int = 100,
     cast_bf16: bool = True,
     mem_prefix: str | None = None,
-    attn_impl: Literal['bmine', 'basic', 'torch', 'flash'] = 'bmine',
+    attn_impl: Literal['bmine', 'basic', 'torch', 'flash', 'flash-triton'] = 'bmine',
     do_compile: bool = False,
     out_prefix: str | None = None,
     check_correctness: bool = False,
@@ -370,7 +373,6 @@ def run_attn_preset(
 
     d_k_list = [16, 32, 64, 128]
     seq_len_list = [256, 1024, 4096, 8192, 16384]
-    d_k_list = [64, 128]
     # seq_len_list = [256, 1024] # , 4096, 8192, 16384]
     mem_err_list = []
     type_kw = 'bf16' if cast_bf16 else 'fp32'
@@ -385,7 +387,7 @@ def run_attn_preset(
         for seq_len in seq_len_list:
             run_name = f'dk{d_k}_cl{seq_len}_{base_name}'
             for bm_mode in ['fw', 'bw']:
-                if attn_impl == 'flash' and bm_mode == 'bw':
+                if attn_impl in ['flash', 'flash-triton'] and bm_mode == 'bw':
                     continue
                 OOM_list = OOM_start[bm_mode]
                 should_run = True

@@ -24,12 +24,59 @@ def causal_mask_helper(r0, r1, c0, c1, mask) -> Literal[-1, 0, 1]:
     return 0
 
 
-def flash_v2_single_head_helper(ctx, Q, K, V, O, L, is_causal):
+def flash_v2_single_head_bwd_helper(ctx, Q, K, V, O, L, dO):
+    device = Q.device
+    is_causal = ctx.is_causal
+    D = torch.mul(dO, O).sum(axis=-1)
+    Bq = ctx.Q_TILE_SIZE
+    Bk = ctx.K_TILE_SIZE
+    for t in [Q, K, V, O, L, dO]:
+        assert t.is_contiguous(), 'Need a contiguous tensor!'
+    Tq = Q.shape[-2] // Bq
+    Tk = K.shape[-2] // Bk
+    B = Q.shape[0]
+    mask = torch.empty(Bq, Bk, device=device, dtype=bool)
+    denom_norm = K.shape[-1] ** (-0.5)
+    dQ = torch.zeros(B, Q.shape[-2], Q.shape[-1], dtype=Q.dtype, device=device)
+    dK = torch.empty(B, K.shape[-2], K.shape[-1], dtype=K.dtype, device=device)
+    dV = torch.empty(B, V.shape[-2], V.shape[-1], dtype=V.dtype, device=device)
+    for j in range(Tk):
+        Kj = K[:, j*Bk:(j+1)*Bk, :]
+        Vj = V[:, j*Bk:(j+1)*Bk, :]
+        dKj = torch.zeros(B, Bk, K.shape[-1], dtype=K.dtype, device=device)
+        dVj = torch.zeros(B, Bk, V.shape[-1], dtype=V.dtype, device=device)
+        for i in range(Tq):
+            Qi = Q[:, i*Bq:(i+1)*Bq, :]
+            dQi = dQ[:, i*Bq:(i+1)*Bq, :]
+            dOi = dO[:, i*Bq:(i+1)*Bq, :]
+            Li = L[:, i*Bq:(i+1)*Bq]
+            Di = D[:, i*Bq:(i+1)*Bq]
+            Sij = einsum(Qi, Kj, 'b b_q d_k, b b_k d_k -> b b_q b_k') * denom_norm
+            if is_causal:
+                mode = causal_mask_helper(i*Bq, (i+1)*Bq-1, j*Bk, (j+1)*Bk-1, mask)
+                if mode == -1:
+                    # entire block on upper right, skip
+                    continue
+                elif mode == 0:
+                    Sij.masked_fill_(~mask, -1e6)
+                # if mode == 1 then no-op
+            Pij = torch.exp(Sij - Li.unsqueeze(-1))
+            dVj.add_(einsum(Pij, dOi, 'b b_q b_k, b b_q d_k -> b b_k d_k'))
+            dPij = einsum(dOi, Vj, 'b b_q d_k, b b_k d_k -> b b_q b_k')
+            dSij = Pij.mul(dPij - Di.unsqueeze(-1)) * denom_norm
+            dQi.add_(einsum(dSij, Kj, 'b b_q b_k, b b_k d_k -> b b_q d_k'))
+            dKj.add_(einsum(dSij, Qi, 'b b_q b_k, b b_q d_k -> b b_k d_k'))
+        dK[:, j*Bk:(j+1)*Bk, :] = dKj
+        dV[:, j*Bk:(j+1)*Bk, :] = dVj
+    return dQ, dK, dV
+
+
+def flash_v2_single_head_fwd_helper(ctx, Q, K, V, O, L, is_causal):
     device = Q.device
     Bq = ctx.Q_TILE_SIZE
     Bk = ctx.K_TILE_SIZE
     for t in [Q, K, V, O, L]:
-        assert t.is_contiguous(), 'Need a contigous tensor!'
+        assert t.is_contiguous(), 'Need a contiguous tensor!'
     Tq = Q.shape[-2] // Bq
     Tk = K.shape[-2] // Bk
     B = Q.shape[0]
@@ -43,7 +90,7 @@ def flash_v2_single_head_helper(ctx, Q, K, V, O, L, is_causal):
         Qi = Q[:, i*Bq:(i+1)*Bq, :]
         Oi.zero_()
         li.zero_()
-        mi_last[...] = -float('inf')
+        mi_last[...] = -1e6
         for j in range(Tk):
             Kj = K[:, j*Bk:(j+1)*Bk, :]
             Vj = V[:, j*Bk:(j+1)*Bk, :]
@@ -54,7 +101,7 @@ def flash_v2_single_head_helper(ctx, Q, K, V, O, L, is_causal):
                     # entire block on upper right, skip
                     continue
                 elif mode == 0:
-                    Sij.masked_fill_(~mask, -float('inf'))
+                    Sij.masked_fill_(~mask, -1e6)
                 # if mode == 1 then no-op
             mi_curr = mi_last.clip(min=Sij.max(dim=-1)[0]) 
             Pij = torch.exp(Sij - mi_curr.unsqueeze(-1))
@@ -77,7 +124,7 @@ def flash_fwd_kernel(
     stride_ob, stride_oq, stride_od,
     stride_lb, stride_lq,
     N_QUERIES, N_KEYS,
-    scale,
+    scale: np.float32,
     is_causal: tl.constexpr,
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
@@ -188,7 +235,7 @@ def flash_fwd_kernel(
         li += tl.sum(Pij, axis=1)
 
         Oi *= adj_coef[:, None]
-        Oi += tl.dot(Pij, V_tile)
+        Oi += tl.dot(Pij.to(V_tile.dtype), V_tile)
 
         mi_last = mi_curr
 
@@ -219,17 +266,18 @@ class FlashAttentionV2NoTriton(torch.autograd.Function):
         Of = O.flatten(end_dim=-3)
         Lf = L.flatten(end_dim=-2)
 
-        flash_v2_single_head_helper(ctx, Qf, Kf, Vf, Of, Lf, is_causal)
+        flash_v2_single_head_fwd_helper(ctx, Qf, Kf, Vf, Of, Lf, is_causal)
 
         ctx.save_for_backward(Q, K, V, O, L)
         ctx.is_causal = is_causal
         return O
-    
+   
     @staticmethod
-    def backward(ctx, dO):
+    def backward(ctx, grad_out):
         Q, K, V, O, L = ctx.saved_tensors
-        is_causal = ctx.is_causal
-        raise NotImplementedError
+        dQ, dK, dV = flash_v2_single_head_bwd_helper(ctx, Q, K, V, O, L, grad_out)
+        return dQ, dK, dV, None
+
 
 def falsh_attention_v2_no_triton(Q, K, V, is_causal=False):
     return FlashAttentionV2NoTriton.apply(Q, K, V, is_causal)
@@ -246,8 +294,8 @@ class FlashAttentionV2Triton(torch.autograd.Function):
         d_k, _, _ = K.shape[-1], K.shape[-2], K.shape[:-2]
         pow2 = 2 ** int(np.floor(np.log2(16 * 1024 // (4 * d_k))))
 
-        ctx.Q_TILE_SIZE = min(seq_len, 64)# , pow2)
-        ctx.K_TILE_SIZE = min(seq_len, 64)# , pow2)
+        ctx.Q_TILE_SIZE = min(seq_len, 32)# , pow2)
+        ctx.K_TILE_SIZE = min(seq_len, 32)# , pow2)
 
         Qf = Q.flatten(end_dim=-3)
         Kf = K.flatten(end_dim=-3)
@@ -261,7 +309,7 @@ class FlashAttentionV2Triton(torch.autograd.Function):
         Tq = triton.cdiv(seq_len, ctx.Q_TILE_SIZE)
         B = Qf.shape[0]
 
-        scale = d_k ** (-0.5)
+        scale = np.float32(d_k ** (-0.5))
 
         flash_fwd_kernel[(Tq, B)](
             Qf, Kf, Vf, Of, Lf,
@@ -283,10 +331,10 @@ class FlashAttentionV2Triton(torch.autograd.Function):
         return O
     
     @staticmethod
-    def backward(ctx, dO):
+    def backward(ctx, grad_out):
         Q, K, V, O, L = ctx.saved_tensors
-        is_causal = ctx.is_causal
-        raise NotImplementedError
+        dQ, dK, dV = flash_v2_single_head_bwd_helper(ctx, Q, K, V, O, L, grad_out)
+        return dQ, dK, dV, None
 
 def falsh_attention_v2_triton(Q, K, V, is_causal=False):
     return FlashAttentionV2Triton.apply(Q, K, V, is_causal)
