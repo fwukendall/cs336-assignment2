@@ -157,7 +157,7 @@ def flash_bwd_kernel(
         V_ptr + batch_index * stride_vb,
         shape=(N_KEYS, D),
         strides=(stride_vk, stride_vd),
-        offsets=(0, 0),
+        offsets=(key_tile_index * K_TILE_SIZE, 0),
         block_shape=(K_TILE_SIZE, D),
         order=(1, 0),
     )
@@ -193,24 +193,15 @@ def flash_bwd_kernel(
         dV_ptr + batch_index * stride_vb,
         shape=(N_KEYS, D),
         strides=(stride_vk, stride_vd),
-        offsets=(0, 0),
+        offsets=(key_tile_index * K_TILE_SIZE, 0),
         block_shape=(K_TILE_SIZE, D),
         order=(1, 0),
     )
     
     dO_block_ptr = tl.make_block_ptr(
-        dO_ptr + batch_index * stride_lb,
-        shape=(N_QUERIES,),
-        strides=(stride_lq,),
-        offsets=(0,),
-        block_shape=(Q_TILE_SIZE,),
-        order=(0,),
-    )
-
-    dQ_block_ptr = tl.make_block_ptr(
-        dQ_ptr + batch_index * stride_qb,
+        dO_ptr + batch_index * stride_ob,
         shape=(N_QUERIES, D),
-        strides=(stride_qq, stride_qd),
+        strides=(stride_oq, stride_od),
         offsets=(0, 0),
         block_shape=(Q_TILE_SIZE, D),
         order=(1, 0),
@@ -225,7 +216,6 @@ def flash_bwd_kernel(
     
 
     Q_block_ptr = Q_block_ptr.advance((skip_till, 0))
-    dQ_block_ptr = dQ_block_ptr.advance((skip_till, 0))
     O_block_ptr = O_block_ptr.advance((skip_till, 0))
     dO_block_ptr = dO_block_ptr.advance((skip_till, 0))
     L_block_ptr = L_block_ptr.advance((skip_till,))
@@ -240,7 +230,7 @@ def flash_bwd_kernel(
         Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option='zero')
         O_tile = tl.load(O_block_ptr, boundary_check=(0, 1), padding_option='zero')
         dO_tile = tl.load(dO_block_ptr, boundary_check=(0, 1), padding_option='zero')
-        L_tile = tl.load(L_block_ptr, boundary_check=(0, 1), padding_option='zero')
+        L_tile = tl.load(L_block_ptr, boundary_check=(0,), padding_option='zero')
         D_tile = tl.sum(O_tile * dO_tile, axis=1)
         Sij = tl.dot(Q_tile, tl.trans(K_tile)) * scale
 
@@ -248,18 +238,26 @@ def flash_bwd_kernel(
         offsets_k = (key_tile_index * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE))[None, :]
         mask = offsets_q >= offsets_k
 
+
         Sij = tl.where(mask, Sij, -1e6)
         Pij = tl.exp(Sij - L_tile[:, None])
-        dVj += tl.dot(tl.trans(Pij), dO_tile)
+        dVj += tl.dot(tl.trans(Pij.to(dO_tile.dtype)), dO_tile)
 
-        dPij = tl.dot(dOi, tl.trans(V_tile))
+        dPij = tl.dot(dO_tile, tl.trans(V_tile))
         dSij = Pij * (dPij - D_tile[:, None]) * scale
 
-        tl.atomic_add(dQ_block_ptr, tl.dot(dSij, K_tile))
-        dKj += tl.dot(tl.trans(dSij), Q_tile)
+        offsets_d = tl.arange(0, D)[None, :]
+        # Manually calculate the exact memory addresses for the dQ tile
+        dQ_ptrs = dQ_ptr + batch_index * stride_qb + offsets_q * stride_qq + offsets_d * stride_qd
+        # Mask to prevent out-of-bounds writes if seq_len isn't perfectly divisible
+        mask_q = (offsets_q < N_QUERIES) & (offsets_d < D)
+
+        dQ_update = tl.dot(dSij.to(K_tile.dtype), K_tile).to(dQ_ptr.type.element_ty)
+        tl.atomic_add(dQ_ptrs, dQ_update, mask=mask_q)
+
+        dKj += tl.dot(tl.trans(dSij.to(Q_tile.dtype)), Q_tile)
 
         Q_block_ptr = Q_block_ptr.advance((Q_TILE_SIZE, 0))
-        dQ_block_ptr = dQ_block_ptr.advance((Q_TILE_SIZE, 0))
         O_block_ptr = O_block_ptr.advance((Q_TILE_SIZE, 0))
         dO_block_ptr = dO_block_ptr.advance((Q_TILE_SIZE, 0))
         L_block_ptr = L_block_ptr.advance((Q_TILE_SIZE,))
@@ -268,27 +266,35 @@ def flash_bwd_kernel(
         Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option='zero')
         O_tile = tl.load(O_block_ptr, boundary_check=(0, 1), padding_option='zero')
         dO_tile = tl.load(dO_block_ptr, boundary_check=(0, 1), padding_option='zero')
-        L_tile = tl.load(L_block_ptr, boundary_check=(0, 1), padding_option='zero')
+        L_tile = tl.load(L_block_ptr, boundary_check=(0,), padding_option='zero')
         D_tile = tl.sum(O_tile * dO_tile, axis=1)
         Sij = tl.dot(Q_tile, tl.trans(K_tile)) * scale
 
         Pij = tl.exp(Sij - L_tile[:, None])
-        dVj += tl.dot(tl.trans(Pij), dO_tile)
+        dVj += tl.dot(tl.trans(Pij.to(dO_tile.dtype)), dO_tile)
 
-        dPij = tl.dot(dOi, tl.trans(V_tile))
+        dPij = tl.dot(dO_tile, tl.trans(V_tile))
         dSij = Pij * (dPij - D_tile[:, None]) * scale
 
-        tl.atomic_add(dQ_block_ptr, tl.dot(dSij, K_tile))
-        dKj += tl.dot(tl.trans(dSij), Q_tile)
+        offsets_q = (offset_start_q + tl.arange(0, Q_TILE_SIZE))[:, None]
+        offsets_d = tl.arange(0, D)[None, :]
+        # Manually calculate the exact memory addresses for the dQ tile
+        dQ_ptrs = dQ_ptr + batch_index * stride_qb + offsets_q * stride_qq + offsets_d * stride_qd
+        # Mask to prevent out-of-bounds writes if seq_len isn't perfectly divisible
+        mask_q = (offsets_q < N_QUERIES) & (offsets_d < D)
+
+        dQ_update = tl.dot(dSij.to(K_tile.dtype), K_tile).to(dQ_ptr.type.element_ty)
+        tl.atomic_add(dQ_ptrs, dQ_update, mask=mask_q)
+
+        dKj += tl.dot(tl.trans(dSij.to(Q_tile.dtype)), Q_tile)
 
         Q_block_ptr = Q_block_ptr.advance((Q_TILE_SIZE, 0))
-        dQ_block_ptr = dQ_block_ptr.advance((Q_TILE_SIZE, 0))
         O_block_ptr = O_block_ptr.advance((Q_TILE_SIZE, 0))
         dO_block_ptr = dO_block_ptr.advance((Q_TILE_SIZE, 0))
         L_block_ptr = L_block_ptr.advance((Q_TILE_SIZE,))
 
-    tl.store(dK_block_ptr, dKj)
-    tl.store(dV_block_ptr, dVj)
+    tl.store(dK_block_ptr, dKj.to(K_block_ptr.type.element_ty))
+    tl.store(dV_block_ptr, dVj.to(V_block_ptr.type.element_ty))
     return
 
 
@@ -514,7 +520,7 @@ class FlashAttentionV2Triton(torch.autograd.Function):
         d_k, seq_len, _ = K.shape[-1], K.shape[-2], K.shape[:-2]
         dO = grad_out
         is_causal = ctx.is_causal
-        dQ = torch.empty(Q.shape, dtype=Q.dtype, device=Q.device)
+        dQ = torch.zeros(Q.shape, dtype=torch.float32, device=Q.device)
         dK = torch.empty(K.shape, dtype=K.dtype, device=K.device)
         dV = torch.empty(V.shape, dtype=V.dtype, device=V.device)
 
