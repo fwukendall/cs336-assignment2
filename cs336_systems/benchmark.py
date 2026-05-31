@@ -13,6 +13,7 @@ import pickle
 
 MODEL_SETUPS = {
     # name: d_model d_ff num_layers num_heads
+    'xs': (32, 32, 4, 4),
     'small': (768, 3072, 12, 12),
     'medium': (1024, 4096, 24, 16),
     'large': (1280, 5120, 36, 20),
@@ -452,4 +453,5 @@ def run_attn_preset(
 
 if __name__ == '__main__':
     fire.Fire()
+
 
