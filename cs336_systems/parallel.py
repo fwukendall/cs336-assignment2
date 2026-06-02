@@ -4,8 +4,164 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import datetime
 from cs336_bmine.langmodel import TransformerLM
-from cs336_bmine.train_util import save_model, cross_entropy
+from cs336_bmine.train_util import save_model, cross_entropy, AdamW
 import numpy as np
+from typing import Type, Any, Optional, Callable
+
+
+class ShardedOptimizer(torch.optim.Optimizer):
+    def __init__(self, params, optimizer_cls: Type[torch.optim.Optimizer], **kwargs: Any):
+        '''
+        Initializes the sharded state optimizer.
+        params is a collection of parameters to be optimized
+        (or parameter groups, in case the user wants to use different hyperparameters,
+        such as learning rates, for different parts of the model);
+        these parameters will be sharded across all the ranks.
+        The optimizer_cls parameter specifies the type of
+        optimizer to be wrapped (e.g., optim.AdamW).
+        Finally, any remaining keyword arguments are forwarded to the
+        constructor of the optimizer_cls. Make sure to
+        call the torch.optim.Optimizer super-class constructor in this method.
+        '''
+        self.num_params = 0
+        self.rank_param_groups = []
+        self.all_param_groups = []
+        super().__init__(params, {})
+        self.optimizer = optimizer_cls(self.rank_param_groups, **kwargs)
+
+    def step(self, closure: Optional[Callable] = None, **kwargs):
+        '''
+        Calls the wrapped optimizer's step() method with the provided closure
+        and keyword arguments. After updating the parameters, synchronize with
+        the other ranks.
+        '''
+        self.optimizer.step(closure, **kwargs)
+        for param_group in self.all_param_groups:
+            for param, prank in zip(param_group['params'], param_group['ranks']):
+                dist.broadcast(param.data, src=prank)
+        return
+
+    def add_param_group(self, param_group: dict[str, Any]):
+        '''
+        This method should add a parameter group to the sharded optimizer.
+        This is called during construction of the sharded optimizer by
+        the super-class constructor and may also be called during training
+        (e.g., for gradually unfreezing layers in a model).
+        As a result, this method should handle assigning the model's
+        parameters among the ranks.
+        '''
+        num_params = self.num_params
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        rank_pg = {k: v for k, v in param_group.items() if k != 'params'}
+        rank_pg['params'] = []
+        full_param_group = {k: v for k, v in param_group.items()}
+        full_param_group['ranks'] = []
+        for param in param_group['params']:
+            prank = num_params % world_size
+            full_param_group['ranks'].append(prank)
+            if prank == rank:
+                rank_pg['params'].append(param)
+            num_params += 1
+
+        self.all_param_groups.append(full_param_group)
+        if len(rank_pg['params']) != 0:
+            self.rank_param_groups.append(rank_pg)
+
+        super().add_param_group(param_group)
+        self.num_params = num_params
+        return
+
+
+def ddp_train_worker(
+    rank,
+    world_size,
+    seed: int,
+    num_steps: int,
+    batch_size: int,
+    model_dims: dict,
+    opt_params: dict,
+    save_model_path: str,
+    device: str | torch.device,
+):
+    setup(rank, world_size)
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    raw_model = TransformerLM(**model_dims, device=device)
+    model = DDP(raw_model)
+
+    # 1. Initialization
+    optimizer = AdamW(model.parameters(), **opt_params)
+    
+    seq_len = model_dims['context_length']
+
+    vocab_size = model_dims['vocab_size']
+
+    # 3. The "Iterative Logic" is inside the worker
+    flat_grad_holder = None
+    for step in range(num_steps):
+        # Step 1: Data Sharding
+        # You must ensure each rank gets a DIFFERENT, non-overlapping slice 
+        # of the current batch (n/d examples).
+        global_batch = get_global_batch(batch_size, seq_len, vocab_size, device)
+        x, y = get_sharded_batch(global_batch, rank, world_size)
+
+        # Step 2: Forward & Backward pass
+
+        logits = model(x)
+        ce = cross_entropy(logits, y)
+
+        ce.backward()
+        model.finish_gradient_synchronization()
+
+        # Step 4: Optimizer update
+        # Since all ranks have identical weights and identical averaged gradients,
+        # this step will deterministically produce the exact same updated weights on all ranks.
+        optimizer.step()
+        optimizer.zero_grad()
+    
+    if rank == 0:
+        save_model(model.module, model_dims, save_model_path)
+
+
+class DDP(torch.nn.Module):
+    def __init__(self, module: torch.nn.Module):
+        '''
+        Given an instantiated PyTorch nn.Module to be parallelized, 
+        construct a DDP container that will handle gradient synchronization
+        across ranks.
+        '''
+        super().__init__()
+        self.module = module
+        for param in self.module.parameters():
+            dist.broadcast(param.data, src=0)
+            if param.requires_grad:
+                param.register_post_accumulate_grad_hook(self.sync_grads)
+        self.handles = []
+
+    def sync_grads(self, param: torch.Tensor):
+        handle = dist.all_reduce(param.grad.data, op=dist.ReduceOp.AVG, async_op=True)
+        self.handles.append(handle)
+        return
+
+    def forward(self, *inputs, **kwargs):
+        '''
+        Calls the wrapped module’s forward() method with the
+        provided positional and keyword arguments.
+        '''
+        return self.module(*inputs, **kwargs)
+
+    def finish_gradient_synchronization(self):
+        '''
+        When called, wait for asynchronous communication
+        '''
+        for handle in self.handles:
+            handle.wait()
+        self.handles.clear()
+        return
+
 
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = "localhost"
@@ -43,7 +199,7 @@ def single_proc_train(
 
     # 1. Initialization
     model = TransformerLM(**model_dims, device=device)
-    optimizer = torch.optim.AdamW(model.parameters(), **opt_params)
+    optimizer = AdamW(model.parameters(), **opt_params)
     
     seq_len = model_dims['context_length']
     vocab_size = model_dims['vocab_size']
@@ -92,7 +248,7 @@ def naive_ddp_train_worker(
 
     # 1. Initialization
     model = TransformerLM(**model_dims, device=device)
-    optimizer = torch.optim.AdamW(model.parameters(), **opt_params)
+    optimizer = AdamW(model.parameters(), **opt_params)
     
     seq_len = model_dims['context_length']
 
@@ -233,6 +389,7 @@ def test_naive_ddp(seed: int = 0, num_steps: int = 10, on_cluster: bool = False)
     save_model_path_1 = '../data/results/dp/model_test_single.pkl'
     save_model_path_2 = '../data/results/dp/model_test_naive_ddp.pkl'
     save_model_path_3 = '../data/results/dp/model_test_naive_ddp_flat.pkl'
+    save_model_path_4 = '../data/results/dp/model_test_ddp.pkl'
 
     opt_params = {}
     print('num_steps', num_steps)
@@ -246,9 +403,14 @@ def test_naive_ddp(seed: int = 0, num_steps: int = 10, on_cluster: bool = False)
     mp.spawn(fn=naive_ddp_train_worker,
              args=(world_size, seed, num_steps, batch_size, model_dims, opt_params, save_model_path_3, device_2, True),
              nprocs=world_size, join=True)
+
+    mp.spawn(fn=ddp_train_worker,
+             args=(world_size, seed, num_steps, batch_size, model_dims, opt_params, save_model_path_4, device_2),
+             nprocs=world_size, join=True)
     
     # Add this to the end of your test_naive_ddp() function:
     verify_models_match(save_model_path_1, save_model_path_2, save_model_path_3)
+    verify_models_match(save_model_path_1, save_model_path_3, save_model_path_4)
     return
 
 if __name__ == '__main__':
