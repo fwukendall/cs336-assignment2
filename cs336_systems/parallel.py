@@ -167,9 +167,8 @@ class FSDP(torch.nn.Module):
                     param.register_post_accumulate_grad_hook(self._sync_grad)
 
     def _sync_grad(self, param_tensor: torch.Tensor):
-        param_tensor.grad.data.div_(self.world_size)
         handle = dist.all_reduce(
-            param_tensor.grad.data, op=dist.ReduceOp.SUM, async_op=True
+            param_tensor.grad.data, op=dist.ReduceOp.AVG, async_op=True
         )
         self.grad_scatter_handles.append(handle)
         return
@@ -209,10 +208,17 @@ class FSDP(torch.nn.Module):
                     
                     # 'grad' here is the gradient of base_tensor. 
                     # It is inherently flat and padded exactly as we need!
-                    grad_to_scatter = grad.contiguous().to(mw.grad.dtype) / self.world_size
+                    casted_grad = grad.contiguous().to(mw.grad.dtype)
+                    pad = self.param_pads[name][pname]
+                    if pad != 0:
+                        ndims = len(grad.shape)
+                        pad_list = [0] * (ndims - 1) * 2 + [0, pad]
+                        grad_to_scatter = torch.nn.functional.pad(casted_grad, pad=pad_list)
+                    else:
+                        grad_to_scatter = casted_grad
                     handle = dist.reduce_scatter_tensor(
                         mw.grad, grad_to_scatter,
-                        op=dist.ReduceOp.SUM, async_op=True,
+                        op=dist.ReduceOp.AVG, async_op=True,
                     )
                     self.grad_scatter_handles.append(handle)
 
